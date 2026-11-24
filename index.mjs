@@ -59,7 +59,7 @@ export function buildPaymentHeader(req, auth, settlementTx = null) {
 // ---------------- the connector ----------------
 export function makeAllot({ vault, agentKey, rpc = CHAIN.rpcUrls.default.http[0], dryRun = false, fetchImpl = fetch, prelude = null }) {
   const account = privateKeyToAccount(agentKey), V = getAddress(vault);
-  const transport = http(rpc, { retryCount: 4, retryDelay: 1500 });
+  const transport = http(rpc, { retryCount: 4, retryDelay: 1500, timeout: 45_000 });
   const pub = createPublicClient({ chain: CHAIN, transport }), wal = createWalletClient({ chain: CHAIN, transport, account });
   const rawRpc = (method, params) => pub.request({ method, params });
 
@@ -128,13 +128,16 @@ export function makeAllot({ vault, agentKey, rpc = CHAIN.rpcUrls.default.http[0]
       const st = await exec("transferWithAuthorization", [auth.from, auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce, "0x"], USDG, ERC20);
       settlementTx = st.hash || (dryRun ? keccak256(st.data) : null);
     }
-    const res = await fetchImpl(url, { ...init, headers: { ...init.headers, "payment-signature": buildPaymentHeader(pick, auth, settlementTx) } });
+    const paymentHeader = buildPaymentHeader(pick, auth, settlementTx);
+    let res = await fetchImpl(url, { ...init, headers: { ...init.headers, "payment-signature": paymentHeader } });
+    // already paid on chain: if the API fails on its side, retry the same payment, it is not charged twice
+    for (let k = 0; settlementTx && res.status >= 500 && k < 4; k++) { await new Promise((r) => setTimeout(r, 4000)); res = await fetchImpl(url, { ...init, headers: { ...init.headers, "payment-signature": paymentHeader } }); }
     const text = await res.text();
     if (!res.ok && !settlementTx) {
       let released = null; try { released = await exec("release", [auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce]); } catch (e) { released = { error: e.message }; }
       return { paid: false, status: res.status, body: text, authorizeTx: tx.hash, released: released.hash || released.error || (released.simulated ? "simulated" : null) };
     }
-    if (!res.ok) return { paid: true, delivered: false, status: res.status, body: text, settlementTx, note: "paid on chain but the API did not deliver; retry the same request or contact the API" };
+    if (!res.ok) return { paid: true, delivered: false, status: res.status, body: text, settlementTx, paymentHeader, note: "paid on chain but the API did not deliver; send the same paymentHeader again as the payment-signature header" };
     return { paid: true, status: res.status, amount: fmt(amount), payTo: to, settlementTx, authorizeTx: tx.hash || (tx.simulated ? "simulated" : null), settlement: res.headers.get("payment-response"), body: text, auth };
   }
 
@@ -177,7 +180,7 @@ async function cli(cmd, args) {
   const { pick } = await readRequirements(first);
   if (!pick) throw new Error("the API asks for payment, but not in USDG on Robinhood Chain");
   const amount = BigInt(pick.amount ?? pick.maxAmountRequired), to = getAddress(pick.payTo);
-  const allowed = (await createPublicClient({ chain: CHAIN, transport: http(cfg.rpc || CHAIN.rpcUrls.default.http[0]) }).readContract({ address: s.vault, abi: VAULT_ABI, functionName: "payeeAllowed", args: [s.agent, to] }));
+  const allowed = (await createPublicClient({ chain: CHAIN, transport: http(cfg.rpc || CHAIN.rpcUrls.default.http[0], { timeout: 45_000 }) }).readContract({ address: s.vault, abi: VAULT_ABI, functionName: "payeeAllowed", args: [s.agent, to] }));
   console.log(`\nThe API asks ${fmt(amount)} USDG, paid to ${to}${allowed ? " (on the approved list)" : " (NOT on the approved list)"}`);
   const why = !s.active ? "this AI key is not active" : s.frozen ? "the vault is frozen" : !allowed ? "the payee is not approved" : amount > s.perPayment ? "over the per payment cap" : amount > s.remaining ? "over what is left of today's x402 limit" : amount > s.vaultBalance ? "the vault does not hold enough USDG" : null;
   if (why) { console.log(`Refused before signing: ${why}. Nothing was sent.`); process.exitCode = 1; return; }
@@ -185,7 +188,7 @@ async function cli(cmd, args) {
   const yes = (await rl.question(`Pay ${fmt(amount)} USDG from the vault? Each transaction is simulated on mainnet first. Type yes to pay: `)).trim().toLowerCase() === "yes"; rl.close();
   if (!yes) { console.log("Cancelled. Nothing was sent."); return; }
   const r = await allot.payX402({ url, maxUsdg: Number(fmt(amount)) });
-  console.log(`\n${r.paid ? "Paid" : "Not paid"} · HTTP ${r.status}${r.authorizeTx ? `\nauthorize tx   ${r.authorizeTx}` : ""}${r.settlementTx ? `\nsettlement tx  ${r.settlementTx}` : ""}\n\n${r.body}`);
+  console.log(`\n${r.paid ? "Paid" : "Not paid"}${r.delivered === false ? " · NOT DELIVERED" : ""} · HTTP ${r.status}${r.authorizeTx ? `\nauthorize tx   ${r.authorizeTx}` : ""}${r.settlementTx ? `\nsettlement tx  ${r.settlementTx}` : ""}\n\n${r.body}`);
 }
 
 async function main() {
