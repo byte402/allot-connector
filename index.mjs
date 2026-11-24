@@ -26,7 +26,7 @@ export const VAULT_ABI = parseAbi([
   "function release(address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce)",
   "error NotOwner()", "error NotAllowed(string reason)",
 ]);
-const ERC20 = parseAbi(["function balanceOf(address) view returns (uint256)"]);
+const ERC20 = parseAbi(["function balanceOf(address) view returns (uint256)", "function transferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce,bytes signature)"]);
 const fmt = (raw) => formatUnits(raw, 6);
 
 // ---------------- x402 parsing ----------------
@@ -41,8 +41,8 @@ export async function readRequirements(res) {
   return { doc, pick, accepts };
 }
 
-export function buildPaymentHeader(req, auth) {
-  const payload = { x402Version: 2, accepted: req, payload: { signature: "0x", authorization: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])) } };
+export function buildPaymentHeader(req, auth, settlementTx = null) {
+  const payload = { x402Version: 2, accepted: req, payload: { signature: "0x", ...(settlementTx ? { settlementTx } : {}), authorization: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])) } };
   return Buffer.from(JSON.stringify(payload)).toString("base64");
 }
 
@@ -74,18 +74,18 @@ export function makeAllot({ vault, agentKey, rpc = CHAIN.rpcUrls.default.http[0]
   }
 
   // simulate on mainnet, then send (or stop, in dry run). Returns {hash?, simulated}
-  async function exec(fn, args) {
-    const data = encodeFunctionData({ abi: VAULT_ABI, functionName: fn, args });
+  async function exec(fn, args, target = V, abi = VAULT_ABI) {
+    const data = encodeFunctionData({ abi, functionName: fn, args });
     const pre = prelude || { stateOverrides: undefined, calls: [] };
-    const sim = await rawRpc("eth_simulateV1", [{ blockStateCalls: [{ stateOverrides: pre.stateOverrides, calls: [...pre.calls, { from: account.address, to: V, data, gas: "0x2dc6c0" }] }], validation: false }, "latest"]);
+    const sim = await rawRpc("eth_simulateV1", [{ blockStateCalls: [{ stateOverrides: pre.stateOverrides, calls: [...pre.calls, ...(exec.chain || []), { from: account.address, to: target, data, gas: "0x2dc6c0" }] }], validation: false }, "latest"]);
     const c = sim[0].calls[pre.calls.length];
     if (c.status !== "0x1") {
       const rd = c.error?.data || c.returnData; let why = "the vault refused";
       try { const d = decodeErrorResult({ abi: VAULT_ABI, data: rd }); why = d.args?.[0] || d.errorName; } catch {}
       throw new Error(`refused by the vault contract: ${why}`);
     }
-    if (dryRun) return { simulated: true, data, gas: parseInt(c.gasUsed, 16) };
-    const hash = await wal.sendTransaction({ to: V, data, gas: BigInt(Math.ceil(parseInt(c.gasUsed, 16) * 1.3 + 20000)) });
+    if (dryRun) { (exec.chain ||= []).push({ from: account.address, to: target, data, gas: "0x2dc6c0" }); return { simulated: true, data, gas: parseInt(c.gasUsed, 16) }; }
+    const hash = await wal.sendTransaction({ to: target, data, gas: BigInt(Math.ceil(parseInt(c.gasUsed, 16) * 1.3 + 20000)) });
     const rc = await pub.waitForTransactionReceipt({ hash, timeout: 90_000 });
     if (rc.status !== "success") throw new Error("the transaction failed on chain: " + hash);
     return { simulated: true, hash, data };
@@ -109,16 +109,23 @@ export function makeAllot({ vault, agentKey, rpc = CHAIN.rpcUrls.default.http[0]
     if (amount > s.remaining) throw new Error(`the API asks ${fmt(amount)} USDG, but only ${fmt(s.remaining)} USDG is left of today's x402 limit`);
     if (amount > s.vaultBalance) throw new Error(`the vault holds ${fmt(s.vaultBalance)} USDG, not enough for ${fmt(amount)}`);
     const now = BigInt(Math.floor(Date.now() / 1000)), timeout = BigInt(pick.maxTimeoutSeconds || 120);
-    const auth = { from: V, to, value: amount, validAfter: 0n, validBefore: now + timeout, nonce: keccak256(toHex(`${V}:${account.address}:${now}:${Math.random()}`)) };
+    const auth = { from: V, to, value: amount, validAfter: 0n, validBefore: now + timeout, nonce: /^0x[0-9a-fA-F]{64}$/.test(pick.extra?.nonce || "") ? pick.extra.nonce : keccak256(toHex(`${V}:${account.address}:${now}:${Math.random()}`)) };
     const ref = keccak256(toHex(url)).slice(0, 66);
     const tx = await exec("authorize", [auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce, ref]);
-    const res = await fetchImpl(url, { ...init, headers: { ...init.headers, "payment-signature": buildPaymentHeader(pick, auth) } });
+    // payer settlement: the API holds no key, so the AI settles its own authorization and sends the tx hash
+    let settlementTx = null;
+    if (pick.extra?.settlement === "payer") {
+      const st = await exec("transferWithAuthorization", [auth.from, auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce, "0x"], USDG, ERC20);
+      settlementTx = st.hash || (dryRun ? keccak256(st.data) : null);
+    }
+    const res = await fetchImpl(url, { ...init, headers: { ...init.headers, "payment-signature": buildPaymentHeader(pick, auth, settlementTx) } });
     const text = await res.text();
-    if (!res.ok) {
+    if (!res.ok && !settlementTx) {
       let released = null; try { released = await exec("release", [auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce]); } catch (e) { released = { error: e.message }; }
       return { paid: false, status: res.status, body: text, authorizeTx: tx.hash, released: released.hash || released.error || (released.simulated ? "simulated" : null) };
     }
-    return { paid: true, status: res.status, amount: fmt(amount), payTo: to, authorizeTx: tx.hash || (tx.simulated ? "simulated" : null), settlement: res.headers.get("payment-response"), body: text, auth };
+    if (!res.ok) return { paid: true, delivered: false, status: res.status, body: text, settlementTx, note: "paid on chain but the API did not deliver; retry the same request or contact the API" };
+    return { paid: true, status: res.status, amount: fmt(amount), payTo: to, settlementTx, authorizeTx: tx.hash || (tx.simulated ? "simulated" : null), settlement: res.headers.get("payment-response"), body: text, auth };
   }
 
   async function pay({ to, amountUsdg, memo = "" }) {
