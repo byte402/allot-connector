@@ -173,6 +173,10 @@ async function cli(cmd, args) {
   const s = await allot.status();
   console.log(`Allot · Robinhood Chain mainnet\nvault   ${s.vault}\nAI key  ${s.agent}  ${s.active ? "active" : "NOT ACTIVE"}${s.frozen ? " · VAULT FROZEN" : ""}\nrules   ${fmt(s.perPayment)} USDG per payment · ${fmt(s.perDay)} per day · ${fmt(s.remaining)} left today\nvault   ${fmt(s.vaultBalance)} USDG · gas ${formatUnits(s.gasEth, 18)} ETH`);
   if (cmd === "status") return;
+  if (cmd === "resend") { // deliver a payment that was settled but not served, with the header printed earlier; pays nothing
+    const [u, h] = args; if (!/^https?:\/\//.test(u || "") || !h) { console.log("\nusage: allot-connector resend <url> <payment header>"); process.exitCode = 1; return; }
+    const res = await fetch(u, { headers: { "payment-signature": h } }); console.log(`\nHTTP ${res.status} (nothing new was paid)\n\n${await res.text()}`); return;
+  }
   const url = args.find((a) => /^https?:\/\//.test(a));
   if (cmd !== "pay" || !url) { console.log("\nusage: allot-connector pay <url>   |   allot-connector status"); process.exitCode = 1; return; }
   const first = await fetch(url);
@@ -192,6 +196,7 @@ async function cli(cmd, args) {
   console.log(`You confirmed up to ${confirm} USDG. Simulating on mainnet, then paying ${fmt(amount)} USDG…`);
   const r = await allot.payX402({ url, maxUsdg: Number(confirm) });
   console.log(`\n${r.paid ? "Paid" : "Not paid"}${r.delivered === false ? " · NOT DELIVERED" : ""} · HTTP ${r.status}${r.authorizeTx ? `\nauthorize tx   ${r.authorizeTx}` : ""}${r.settlementTx ? `\nsettlement tx  ${r.settlementTx}` : ""}\n\n${r.body}`);
+  if (r.delivered === false && r.paymentHeader) console.log(`\nYour payment is settled. To get the data later without paying again, run:\n\n  npx -y github:byte402/allot-connector resend ${url} ${r.paymentHeader}\n`);
 }
 
 async function main() {
