@@ -10,7 +10,8 @@
 //
 // Terminal use, where you approve each payment yourself:
 //   npx -y github:byte402/allot-connector status
-//   npx -y github:byte402/allot-connector pay <url>
+//   npx -y github:byte402/allot-connector pay <url>                 (shows the price, sends nothing)
+//   npx -y github:byte402/allot-connector pay <url> --confirm 0.01  (your yes: pays at most 0.01 USDG)
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -21,7 +22,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import readline from "node:readline/promises";
 
 export const USDG = getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
 export const CHAIN = { id: 4663, name: "Robinhood Chain", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: ["https://rpc.mainnet.chain.robinhood.com"] } } };
@@ -184,10 +184,13 @@ async function cli(cmd, args) {
   console.log(`\nThe API asks ${fmt(amount)} USDG, paid to ${to}${allowed ? " (on the approved list)" : " (NOT on the approved list)"}`);
   const why = !s.active ? "this AI key is not active" : s.frozen ? "the vault is frozen" : !allowed ? "the payee is not approved" : amount > s.perPayment ? "over the per payment cap" : amount > s.remaining ? "over what is left of today's x402 limit" : amount > s.vaultBalance ? "the vault does not hold enough USDG" : null;
   if (why) { console.log(`Refused before signing: ${why}. Nothing was sent.`); process.exitCode = 1; return; }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const yes = (await rl.question(`Pay ${fmt(amount)} USDG from the vault? Each transaction is simulated on mainnet first. Type yes to pay: `)).trim().toLowerCase() === "yes"; rl.close();
-  if (!yes) { console.log("Cancelled. Nothing was sent."); return; }
-  const r = await allot.payX402({ url, maxUsdg: Number(fmt(amount)) });
+  // your yes is the --confirm amount: no typing while the program runs (npx on Windows mixes up the prompt)
+  const ci = args.indexOf("--confirm"), confirm = ci >= 0 ? args[ci + 1] : null;
+  if (!confirm) { console.log(`\nNothing was sent. To pay, run the same command again with your yes and the most you accept:\n\n  npx -y github:byte402/allot-connector pay ${url} --confirm ${fmt(amount)}\n`); return; }
+  if (!/^\d+(\.\d{1,6})?$/.test(confirm)) throw new Error("--confirm needs an amount in USDG, like --confirm 0.01");
+  if (amount > parseUnits(confirm, 6)) { console.log(`Refused: the API now asks ${fmt(amount)} USDG, more than the ${confirm} you confirmed. Nothing was sent.`); process.exitCode = 1; return; }
+  console.log(`You confirmed up to ${confirm} USDG. Simulating on mainnet, then paying ${fmt(amount)} USDG…`);
+  const r = await allot.payX402({ url, maxUsdg: Number(confirm) });
   console.log(`\n${r.paid ? "Paid" : "Not paid"}${r.delivered === false ? " · NOT DELIVERED" : ""} · HTTP ${r.status}${r.authorizeTx ? `\nauthorize tx   ${r.authorizeTx}` : ""}${r.settlementTx ? `\nsettlement tx  ${r.settlementTx}` : ""}\n\n${r.body}`);
 }
 

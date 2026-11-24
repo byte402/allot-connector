@@ -32,9 +32,10 @@ Payments use x402 v2 "exact" with EIP-3009 on USDG, signed by the vault through 
 
 ## Pay from your terminal
 
-You approve each payment yourself. The connector reads the `allot` entry of your Claude Desktop config (or `ALLOT_VAULT` and `ALLOT_AGENT_KEY`), shows the price, checks your vault rules, and asks you to type `yes` before anything is sent. Each transaction is simulated on mainnet first.
+You approve each payment yourself. The connector reads the `allot` entry of your Claude Desktop config (or `ALLOT_VAULT` and `ALLOT_AGENT_KEY`), checks your vault rules and shows the price. Nothing is sent until you run the command again with `--confirm` and the most you accept. Each transaction is simulated on mainnet first.
 
 ```
 npx -y github:byte402/allot-connector status
 npx -y github:byte402/allot-connector pay https://allot-api.polished-dream-0948.workers.dev/v1/price?symbol=NVDA
+npx -y github:byte402/allot-connector pay https://allot-api.polished-dream-0948.workers.dev/v1/price?symbol=NVDA --confirm 0.01
 ```
