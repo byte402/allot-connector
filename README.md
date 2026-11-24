@@ -14,7 +14,7 @@ The AI holds only its own agent key. The vault contract enforces every rule on c
   "mcpServers": {
     "allot": {
       "command": "npx",
-      "args": ["-y", "allot-connector"],
+      "args": ["-y", "github:byte402/allot-connector"],
       "env": { "ALLOT_VAULT": "0xYourVault", "ALLOT_AGENT_KEY": "0xYourAIKey" }
     }
   }
@@ -29,3 +29,12 @@ The AI holds only its own agent key. The vault contract enforces every rule on c
 Every transaction is simulated on Robinhood Chain mainnet with `eth_simulateV1` before it is sent. If an API does not deliver after payment was authorized, the connector releases the authorization so it cannot be settled.
 
 Payments use x402 v2 "exact" with EIP-3009 on USDG, signed by the vault through ERC-1271.
+
+## Pay from your terminal
+
+You approve each payment yourself. The connector reads the `allot` entry of your Claude Desktop config (or `ALLOT_VAULT` and `ALLOT_AGENT_KEY`), shows the price, checks your vault rules, and asks you to type `yes` before anything is sent. Each transaction is simulated on mainnet first.
+
+```
+npx -y github:byte402/allot-connector status
+npx -y github:byte402/allot-connector pay https://allot-api.polished-dream-0948.workers.dev/v1/price?symbol=NVDA
+```
