@@ -6,12 +6,22 @@
 //
 // env: ALLOT_VAULT (vault address), ALLOT_AGENT_KEY (the AI's key), ALLOT_RPC (optional),
 //      ALLOT_DRY_RUN=1 (simulate only, never send; for testing)
+// If the env vars are not set, the "allot" entry of the Claude Desktop config on this machine is used.
+//
+// Terminal use, where you approve each payment yourself:
+//   npx -y github:byte402/allot-connector status
+//   npx -y github:byte402/allot-connector pay <url>
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as VIEM from "viem";
 import { createPublicClient, createWalletClient, http, parseAbi, encodeFunctionData, decodeErrorResult, getAddress, toHex, keccak256, formatUnits, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import readline from "node:readline/promises";
 
 export const USDG = getAddress("0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168");
 export const CHAIN = { id: 4663, name: "Robinhood Chain", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: ["https://rpc.mainnet.chain.robinhood.com"] } } };
@@ -136,10 +146,53 @@ export function makeAllot({ vault, agentKey, rpc = CHAIN.rpcUrls.default.http[0]
 }
 
 // ---------------- MCP server ----------------
+// settings: env vars first, then the "allot" entry in the Claude Desktop config on this machine
+function claudeConfigFiles() {
+  const home = os.homedir(), out = [];
+  if (process.env.APPDATA) out.push(path.join(process.env.APPDATA, "Claude", "claude_desktop_config.json"));
+  if (process.env.LOCALAPPDATA) { const pk = path.join(process.env.LOCALAPPDATA, "Packages"); try { for (const d of fs.readdirSync(pk)) if (/^Claude/i.test(d)) out.push(path.join(pk, d, "LocalCache", "Roaming", "Claude", "claude_desktop_config.json")); } catch {} }
+  out.push(path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"), path.join(home, ".config", "Claude", "claude_desktop_config.json"));
+  return out;
+}
+export function loadSettings(env = process.env) {
+  let { ALLOT_VAULT: vault, ALLOT_AGENT_KEY: key, ALLOT_RPC: rpc } = env, source = "environment";
+  if (!vault || !key) for (const f of claudeConfigFiles()) {
+    try { const e = JSON.parse(fs.readFileSync(f, "utf8")).mcpServers?.allot?.env; if (e?.ALLOT_VAULT && e?.ALLOT_AGENT_KEY) { vault ||= e.ALLOT_VAULT; key ||= e.ALLOT_AGENT_KEY; rpc ||= e.ALLOT_RPC; source = f; break; } } catch {}
+  }
+  if (!vault || !key) throw new Error("set ALLOT_VAULT and ALLOT_AGENT_KEY, or add the allot entry to your Claude Desktop config");
+  key = String(key).trim(); if (!key.startsWith("0x")) key = "0x" + key;
+  return { vault: String(vault).trim(), agentKey: key, rpc: rpc || undefined, source };
+}
+
+// ---------------- terminal: you approve each payment ----------------
+async function cli(cmd, args) {
+  const cfg = loadSettings(), allot = makeAllot(cfg);
+  const s = await allot.status();
+  console.log(`Allot · Robinhood Chain mainnet\nvault   ${s.vault}\nAI key  ${s.agent}  ${s.active ? "active" : "NOT ACTIVE"}${s.frozen ? " · VAULT FROZEN" : ""}\nrules   ${fmt(s.perPayment)} USDG per payment · ${fmt(s.perDay)} per day · ${fmt(s.remaining)} left today\nvault   ${fmt(s.vaultBalance)} USDG · gas ${formatUnits(s.gasEth, 18)} ETH`);
+  if (cmd === "status") return;
+  const url = args.find((a) => /^https?:\/\//.test(a));
+  if (cmd !== "pay" || !url) { console.log("\nusage: allot-connector pay <url>   |   allot-connector status"); process.exitCode = 1; return; }
+  const first = await fetch(url);
+  if (first.status !== 402) { console.log(`\n${url} answered ${first.status}, no payment needed:\n${await first.text()}`); return; }
+  const { pick } = await readRequirements(first);
+  if (!pick) throw new Error("the API asks for payment, but not in USDG on Robinhood Chain");
+  const amount = BigInt(pick.amount ?? pick.maxAmountRequired), to = getAddress(pick.payTo);
+  const allowed = (await createPublicClient({ chain: CHAIN, transport: http(cfg.rpc || CHAIN.rpcUrls.default.http[0]) }).readContract({ address: s.vault, abi: VAULT_ABI, functionName: "payeeAllowed", args: [s.agent, to] }));
+  console.log(`\nThe API asks ${fmt(amount)} USDG, paid to ${to}${allowed ? " (on the approved list)" : " (NOT on the approved list)"}`);
+  const why = !s.active ? "this AI key is not active" : s.frozen ? "the vault is frozen" : !allowed ? "the payee is not approved" : amount > s.perPayment ? "over the per payment cap" : amount > s.remaining ? "over what is left of today's x402 limit" : amount > s.vaultBalance ? "the vault does not hold enough USDG" : null;
+  if (why) { console.log(`Refused before signing: ${why}. Nothing was sent.`); process.exitCode = 1; return; }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const yes = (await rl.question(`Pay ${fmt(amount)} USDG from the vault? Each transaction is simulated on mainnet first. Type yes to pay: `)).trim().toLowerCase() === "yes"; rl.close();
+  if (!yes) { console.log("Cancelled. Nothing was sent."); return; }
+  const r = await allot.payX402({ url, maxUsdg: Number(fmt(amount)) });
+  console.log(`\n${r.paid ? "Paid" : "Not paid"} · HTTP ${r.status}${r.authorizeTx ? `\nauthorize tx   ${r.authorizeTx}` : ""}${r.settlementTx ? `\nsettlement tx  ${r.settlementTx}` : ""}\n\n${r.body}`);
+}
+
 async function main() {
-  const { ALLOT_VAULT, ALLOT_AGENT_KEY, ALLOT_RPC, ALLOT_DRY_RUN } = process.env;
-  if (!ALLOT_VAULT || !ALLOT_AGENT_KEY) { console.error("allot-connector: set ALLOT_VAULT and ALLOT_AGENT_KEY"); process.exit(1); }
-  const allot = makeAllot({ vault: ALLOT_VAULT, agentKey: ALLOT_AGENT_KEY, rpc: ALLOT_RPC || undefined, dryRun: ALLOT_DRY_RUN === "1" });
+  const [cmd, ...rest] = process.argv.slice(2);
+  if (cmd) { try { await cli(cmd, rest); } catch (e) { console.error("allot: " + (e.shortMessage || e.message)); process.exitCode = 1; } return; }
+  let cfg; try { cfg = loadSettings(); } catch (e) { console.error("allot-connector: " + e.message); process.exit(1); }
+  const allot = makeAllot({ ...cfg, dryRun: process.env.ALLOT_DRY_RUN === "1" });
   const server = new McpServer({ name: "allot", version: "0.1.0" });
   const out = (o) => ({ content: [{ type: "text", text: typeof o === "string" ? o : JSON.stringify(o, (k, v) => (typeof v === "bigint" ? v.toString() : v), 2) }] });
   const err = (e) => ({ isError: true, content: [{ type: "text", text: e.message || String(e) }] });
@@ -164,4 +217,10 @@ async function main() {
 
   await server.connect(new StdioServerTransport());
 }
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("allot-connector")) main();
+// run when started directly (node, npx, or the Windows npx shim), not when imported by tests
+function startedDirectly() {
+  const a = process.argv[1]; if (!a) return false;
+  try { if (import.meta.url.toLowerCase() === pathToFileURL(fs.realpathSync(a)).href.toLowerCase()) return true; } catch {}
+  return /allot-connector(\.cmd|\.ps1)?$/i.test(a) || /[\\/]allot-connector[\\/]index\.mjs$/i.test(a);
+}
+if (startedDirectly()) main();
