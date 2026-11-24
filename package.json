@@ -1,0 +1,32 @@
+{
+  "name": "allot-connector",
+  "version": "0.1.0",
+  "description": "MCP server that lets an AI pay x402 APIs from an Allot Vault on Robinhood Chain, never more than its owner allows.",
+  "type": "module",
+  "main": "index.mjs",
+  "bin": {
+    "allot-connector": "index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "x402",
+    "ai-agent",
+    "robinhood-chain",
+    "usdg",
+    "allot"
+  ],
+  "homepage": "https://allot.dev",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "viem": "^2.58.4",
+    "zod": "^3.25.76"
+  }
+}
