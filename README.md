@@ -23,6 +23,7 @@ The AI holds only its own agent key. The vault contract enforces every rule on c
 
 ## Tools
 - `allot_status`: the vault's rules, what is left today, balance, key state.
+- `allot_find`: search the [Allot directory](https://allot.dev/directory) of x402 APIs that take USDG on Robinhood Chain; each result has the URL, price, what it returns, the payee and whether that payee is approved for this AI. Pays nothing.
 - `allot_pay_x402`: fetch a URL; if it answers 402 with a USDG offer on Robinhood Chain, pay it from the vault and return the response.
 - `allot_pay`: send USDG to an approved payee.
 
@@ -35,6 +36,7 @@ Payments use x402 v2 "exact" with EIP-3009 on USDG, signed by the vault through 
 You approve each payment yourself. The connector reads the `allot` entry of your Claude Desktop config (or `ALLOT_VAULT` and `ALLOT_AGENT_KEY`), checks your vault rules and shows the price. Nothing is sent until you run the command again with `--confirm` and the most you accept. Each transaction is simulated on mainnet first.
 
 ```
+npx -y github:byte402/allot-connector find price          (searches the directory, needs no key)
 npx -y github:byte402/allot-connector status
 npx -y github:byte402/allot-connector pay https://allot-api.polished-dream-0948.workers.dev/v1/price?symbol=NVDA
 npx -y github:byte402/allot-connector pay https://allot-api.polished-dream-0948.workers.dev/v1/price?symbol=NVDA --confirm 0.01

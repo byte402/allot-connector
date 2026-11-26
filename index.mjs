@@ -167,8 +167,28 @@ export function loadSettings(env = process.env) {
   return { vault: String(vault).trim(), agentKey: key, rpc: rpc || undefined, source };
 }
 
+// ---------------- the Allot directory: x402 APIs that take USDG on Robinhood Chain ----------------
+export const DIRECTORY_URL = "https://allot.dev/directory.json";
+export async function findApis(query = "", { fetchImpl = fetch, url = DIRECTORY_URL } = {}) {
+  const r = await fetchImpl(url, { headers: { accept: "application/json" } });
+  if (!r.ok) throw new Error(`the directory answered ${r.status}`);
+  const d = await r.json(), words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const out = [];
+  for (const a of d.apis || []) for (const e of a.endpoints || []) {
+    const text = [a.name, a.by, a.category, e.path, e.what].join(" ").toLowerCase();
+    if (words.every((w) => text.includes(w))) out.push({ api: a.name, by: a.by, category: a.category, url: a.base.replace(/\/+$/, "") + e.path, priceUsdg: e.price, what: e.what, payTo: a.payTo, source: a.source });
+  }
+  return out;
+}
+
 // ---------------- terminal: you approve each payment ----------------
 async function cli(cmd, args) {
+  if (cmd === "find") { // needs no key: reads the public directory
+    const list = await findApis(args.join(" "));
+    if (!list.length) { console.log("No listed x402 API matches. See https://allot.dev/directory"); return; }
+    for (const x of list) console.log(`${x.priceUsdg.padEnd(6)} USDG  ${x.url}\n        ${x.what} · ${x.api} · payee ${x.payTo}`);
+    console.log(`\n${list.length} endpoint${list.length === 1 ? "" : "s"}. To pay one: npx -y github:byte402/allot-connector pay <url>  (shows the price, sends nothing)`); return;
+  }
   const cfg = loadSettings(), allot = makeAllot(cfg);
   const s = await allot.status();
   console.log(`Allot · Robinhood Chain mainnet\nvault   ${s.vault}\nAI key  ${s.agent}  ${s.active ? "active" : "NOT ACTIVE"}${s.frozen ? " · VAULT FROZEN" : ""}\nrules   ${fmt(s.perPayment)} USDG per payment · ${fmt(s.perDay)} per day · ${fmt(s.remaining)} left today\nvault   ${fmt(s.vaultBalance)} USDG · gas ${formatUnits(s.gasEth, 18)} ETH`);
@@ -178,7 +198,7 @@ async function cli(cmd, args) {
     const res = await fetch(u, { headers: { "payment-signature": h } }); console.log(`\nHTTP ${res.status} (nothing new was paid)\n\n${await res.text()}`); return;
   }
   const url = args.find((a) => /^https?:\/\//.test(a));
-  if (cmd !== "pay" || !url) { console.log("\nusage: allot-connector pay <url>   |   allot-connector status"); process.exitCode = 1; return; }
+  if (cmd !== "pay" || !url) { console.log("\nusage: allot-connector pay <url>   |   allot-connector status   |   allot-connector find <words>"); process.exitCode = 1; return; }
   const first = await fetch(url);
   if (first.status !== 402) { console.log(`\n${url} answered ${first.status}, no payment needed:\n${await first.text()}`); return; }
   const { pick } = await readRequirements(first);
@@ -204,7 +224,7 @@ async function main() {
   if (cmd) { try { await cli(cmd, rest); } catch (e) { console.error("allot: " + (e.shortMessage || e.message)); process.exitCode = 1; } return; }
   let cfg; try { cfg = loadSettings(); } catch (e) { console.error("allot-connector: " + e.message); process.exit(1); }
   const allot = makeAllot({ ...cfg, dryRun: process.env.ALLOT_DRY_RUN === "1" });
-  const server = new McpServer({ name: "allot", version: "0.1.0" });
+  const server = new McpServer({ name: "allot", version: "0.2.0" });
   const out = (o) => ({ content: [{ type: "text", text: typeof o === "string" ? o : JSON.stringify(o, (k, v) => (typeof v === "bigint" ? v.toString() : v), 2) }] });
   const err = (e) => ({ isError: true, content: [{ type: "text", text: e.message || String(e) }] });
 
@@ -213,6 +233,16 @@ async function main() {
     description: "Shows this AI's Allot vault on Robinhood Chain: per payment cap, daily x402 limit, what is left today, vault balance, and whether the key is active. Call this before paying when unsure.",
     inputSchema: {},
   }, async () => { try { const s = await allot.status(); return out({ vault: s.vault, agent: s.agent, active: s.active, frozen: s.frozen, perPaymentUsdg: fmt(s.perPayment), x402LimitPerDayUsdg: fmt(s.perDay), leftTodayUsdg: fmt(s.remaining), vaultBalanceUsdg: fmt(s.vaultBalance), keyExpires: s.expiry ? new Date(Number(s.expiry) * 1000).toISOString() : "never", gasEth: formatUnits(s.gasEth, 18) }); } catch (e) { return err(e); } });
+
+  server.registerTool("allot_find", {
+    title: "Find an x402 API",
+    description: "Searches the Allot directory of x402 APIs that take USDG on Robinhood Chain: each result has the endpoint URL, its price, what it returns, the payee, and whether that payee is already approved for this AI. Use it to find an API before paying with allot_pay_x402. Finding pays nothing.",
+    inputSchema: { query: z.string().optional().describe("words to match, e.g. 'price' or 'wallet balances'; empty lists everything") },
+  }, async (a) => { try {
+    const list = await findApis(a.query || ""), s = await allot.status(), pc = createPublicClient({ chain: CHAIN, transport: http(cfg.rpc || CHAIN.rpcUrls.default.http[0], { timeout: 45_000 }) });
+    const seen = new Map(); for (const x of list) if (!seen.has(x.payTo)) seen.set(x.payTo, await pc.readContract({ address: s.vault, abi: VAULT_ABI, functionName: "payeeAllowed", args: [s.agent, getAddress(x.payTo)] }).catch(() => null));
+    return out({ results: list.map((x) => ({ ...x, payeeApprovedForThisAI: seen.get(x.payTo) })), note: list.length ? "A payee that is not approved must be added by the vault owner in the Allot app before this AI can pay it." : "No listed API matches: https://allot.dev/directory" });
+  } catch (e) { return err(e); } });
 
   server.registerTool("allot_pay_x402", {
     title: "Pay an x402 API",
