@@ -51,8 +51,11 @@ export async function readRequirements(res) {
   return { doc, pick, accepts };
 }
 
-export function buildPaymentHeader(req, auth, settlementTx = null) {
-  const payload = { x402Version: 2, accepted: req, payload: { signature: "0x", ...(settlementTx ? { settlementTx } : {}), authorization: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])) } };
+// Same text the API checks: proves the answer goes to the wallet that settled, not to anyone who saw the tx hash.
+export const requesterMessage = (resource, tx) => `allot-x402 payment\nresource: ${resource}\ntx: ${String(tx).toLowerCase()}`;
+
+export function buildPaymentHeader(req, auth, settlementTx = null, requesterSignature = null) {
+  const payload = { x402Version: 2, accepted: req, payload: { signature: "0x", ...(settlementTx ? { settlementTx } : {}), ...(requesterSignature ? { requesterSignature } : {}), authorization: Object.fromEntries(Object.entries(auth).map(([k, v]) => [k, typeof v === "bigint" ? v.toString() : v])) } };
   return Buffer.from(JSON.stringify(payload)).toString("base64");
 }
 
@@ -128,7 +131,9 @@ export function makeAllot({ vault, agentKey, rpc = CHAIN.rpcUrls.default.http[0]
       const st = await exec("transferWithAuthorization", [auth.from, auth.to, auth.value, auth.validAfter, auth.validBefore, auth.nonce, "0x"], USDG, ERC20);
       settlementTx = st.hash || (dryRun ? keccak256(st.data) : null);
     }
-    const paymentHeader = buildPaymentHeader(pick, auth, settlementTx);
+    // the AI key sent the settlement tx, so it also signs that it is the one asking for the answer
+    const requesterSignature = settlementTx && pick.extra?.settlement === "payer" ? await account.signMessage({ message: requesterMessage(pick.resource || url, settlementTx) }) : null;
+    const paymentHeader = buildPaymentHeader(pick, auth, settlementTx, requesterSignature);
     let res = await fetchImpl(url, { ...init, headers: { ...init.headers, "payment-signature": paymentHeader } });
     // already paid on chain: if the API fails on its side, retry the same payment, it is not charged twice
     for (let k = 0; settlementTx && res.status >= 500 && k < 4; k++) { await new Promise((r) => setTimeout(r, 4000)); res = await fetchImpl(url, { ...init, headers: { ...init.headers, "payment-signature": paymentHeader } }); }
