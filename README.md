@@ -38,6 +38,6 @@ You approve each payment yourself. The connector reads the `allot` entry of your
 ```
 npx -y github:byte402/allot-connector find price          (searches the directory, needs no key)
 npx -y github:byte402/allot-connector status
-npx -y github:byte402/allot-connector pay https://allot-api.polished-dream-0948.workers.dev/v1/price?symbol=NVDA
-npx -y github:byte402/allot-connector pay https://allot-api.polished-dream-0948.workers.dev/v1/price?symbol=NVDA --confirm 0.01
+npx -y github:byte402/allot-connector pay https://allot-api.netlify.app/v1/price?symbol=NVDA
+npx -y github:byte402/allot-connector pay https://allot-api.netlify.app/v1/price?symbol=NVDA --confirm 0.01
 ```
